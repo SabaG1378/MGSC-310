@@ -1,7 +1,18 @@
-# can everyone see this?
-#Brenden
-#Garett, whats up
-#emily 
+library(knitr)
+set.seed(1818)
+library("tidyverse")
+library("readr")
+library("tidyverse")
+library("rsample")
+library('glmnet')
+library('glmnetUtils')
+library('forcats')
+library('dplyr')
+library('dummies')
+library('tableone')
+library ('magrittr')
+
+Airlines_df <- read.csv(here::here("datasets", "Invistico_Airline.csv"))
 
 
 Airlines_clean <- Airlines_df %>% mutate(
@@ -23,14 +34,22 @@ Online.boarding=factor(Online.boarding),
 Gender = factor(Gender),
 Leg.room.service = factor(Leg.room.service))
 
-Airlines_clean$Age <- cut(Airlines_clean$Age, breaks = seq(10,100,by=15),right = TRUE)
 
-Airline_split <- initial_split(Airlines_clean, p=0.8) 
-                        ##if 0.8 does not run (it didnt on my laptop, try selecting a very small sample like 0.05 or 0.01 for P)
+Airlines_clean$Age <- cut(Airlines_clean$Age, breaks = seq(0,100,by=15),right = TRUE)
+
+colSums(is.na(Airlines_clean))
+Airlines_clean <- drop_na(Airlines_clean)
+
+Airline_split <- initial_split(Airlines_clean, p=0.5)
 Airline_train <- training(Airline_split)
 Airline_test <- testing(Airline_split)
 
-enet_mod1 <- cva.glmnet(satisfaction ~ .,
+# Elastic Net Model 
+
+enet_mod1 <- cva.glmnet(satisfaction ~ Seat.comfort + Gate.location + Ease.of.Online.booking + Leg.room.service 
+                                         + Cleanliness + Departure.Delay.in.Minutes + Arrival.Delay.in.Minutes + Class + 
+                                           Inflight.wifi.service + Inflight.entertainment +  
+                                           On.board.service + Age,
                        data = Airline_train, 
                        alpha_list = seq(0,1, by = 0.1),
                       family = "binomial")
@@ -48,208 +67,292 @@ get_alpha <- function(fit) {
 best_alpha <- get_alpha(enet_mod1)
 print(best_alpha)
 
-lasso_mod1<- cv.glmnet(satisfaction ~ . , 
-                        data = Airline_train, 
-                       alpha = 1,
-                       family = "binomial")
                        
-preds_train_lasso <- predict(lasso_mod1, s= lasso_mod1$lambda.1se, newdata=Airline_train)
+library(coefplot)
+library(data.table)
+options(scipen = 9)
 
-preds_test_lasso <- predict(lasso_mod1, s= lasso_mod1$lambda.1se, newdata = Airline_test)
+#LASSO MODEL
 
-complete_cases_train <- drop_na(Airline_train)
+lasso_mod1<- cv.glmnet(satisfaction ~ Seat.comfort + Gate.location + Ease.of.Online.booking 
+                                      + Leg.room.service + Cleanliness + Departure.Delay.in.Minutes 
+                                       + Arrival.Delay.in.Minutes + Class + Inflight.wifi.service + Inflight.entertainment 
+                                       +  On.board.service + Age, 
+                      data = Airline_train, 
+                      alpha = 1,
+                      family = "binomial")
+plot(lasso_mod1)
+coefpath(lasso_mod1)
 
-complete_cases_test <- drop_na(Airline_test)
 
-results_lasso <- data.frame(c(complete_cases_train$satisfaction,complete_cases_test$satisfaction),c(preds_train_lasso, preds_test_lasso), 
-as.factor(c(rep("Train", length(preds_train_lasso)),rep("Test", length(preds_test_lasso))))) %>% 
-          rename("true" = 1, "preds" = 2, "test_train" = 3)
-          
-data.frame(results_lasso)
+coef_lasso_min <- coef(lasso_mod1, s= lasso_mod1$lambda.min)
+coef_lasso_min <- coef_lasso_min %>% as.matrix() %>% as.data.frame %>% round(3)
+
+coef_lasso_1se <- coef(lasso_mod1, s= lasso_mod1$lambda.1se)
+coef_lasso_1se <- coef_lasso_1se %>% as.matrix() %>% as.data.frame %>% round(3)
+
+data.frame(coef_lasso_min, coef_lasso_1se) %>% 
+  rename(`Lambda.min` = 1, `lambda.1se` = 2)
 
 
-# Logistic Model
+preds_train_lasso <- predict(lasso_mod1, s= lasso_mod1$lambda.1se, 
+                             newdata=Airline_train,
+                             type = "response")
 
-```{r}
-library(glmnet)
-library(glmnetUtils)
+preds_test_lasso <- predict(lasso_mod1, s= lasso_mod1$lambda.1se, 
+                            newdata = Airline_test,
+                            type = "response")
+
+head(preds_train_lasso)
+
+library("yardstick")
+library('plotROC')
+library('ggplot2')
+
+temp_test <- data_frame(Airline_01 = ifelse(preds_test_lasso > 0.1, 1,0),
+                        Airline_02 = ifelse(preds_test_lasso > 0.2, 1,0),
+                        Airline_03 = ifelse(preds_test_lasso > 0.3, 1,0),
+                        Airline_04 = ifelse(preds_test_lasso > 0.4, 1,0),
+                        Airline_05 = ifelse(preds_test_lasso > 0.5, 1,0),
+                        Airline_06 = ifelse(preds_test_lasso > 0.6, 1,0),
+                        Airline_07 = ifelse(preds_test_lasso > 0.7, 1,0),
+                        Airline_08 = ifelse(preds_test_lasso > 0.8, 1,0),
+                        Airline_09 = ifelse(preds_test_lasso > 0.9, 1,0))
+map(temp_test,mean)
+
+results_train_lasso <- data.frame(
+predicted = as.factor((ifelse(preds_train_lasso > 0.5, 1, 0))), 
+actual = as.numeric(Airline_train$satisfaction),
+type = rep("train", length(preds_train_lasso))
+) %>% 
+  rename(`predicted` = 1, `actual` = 2, `type` = 3) %>% 
+   mutate(actual = as.factor(ifelse(actual == 2, "1", "0")))
+
+
+results_test_lasso <- data.frame ( 
+predicted = as.factor((ifelse(preds_test_lasso > 0.5, 1, 0))), 
+actual = as.numeric(Airline_test$satisfaction),
+type = rep("test", length(preds_test_lasso))
+) %>% 
+  rename(`predicted` = 1, `actual` = 2, `type` = 3) %>% 
+  mutate(actual = as.factor(ifelse(actual == 2, "1", "0")))
+
+train_ROC_lasso <- ggplot(results_train_lasso,
+                    aes(m = preds_train_lasso, d = as.numeric(actual))) +
+                   geom_roc(labelsize = 3.5,
+                            cutoffs.at = 
+                        c(0.99,0.9,0.7,0.5,0.3,0.1,0))+
+                     theme_minimal(base_size = 10)
+
+test_ROC_lasso <- ggplot(results_test_lasso,
+                   aes(m = preds_test_lasso, d = as.numeric(actual))) +
+                    geom_roc(labelsize = 3.5,
+                      cutoffs.at = 
+                        c(0.99,0.9,0.7,0.5,0.3,0.1,0)) +
+                     theme_minimal(base_size = 10) 
+
+print(test_ROC_lasso)
+print(train_ROC_lasso)
+
+calc_auc(train_ROC_lasso)
+calc_auc(test_ROC_lasso)
+
+
+data.table(results_train_lasso)
+
+train_confM_lasso <- conf_mat(results_train_lasso,
+                       truth = actual,
+                      estimate = predicted)
+
+test_confM_lasso <- conf_mat(results_test_lasso,
+                       truth = actual,
+                      estimate = predicted)
+
+print(train_confM_lasso)#(true positives/ all positives)
+print(test_confM_lasso)
+
+autoplot(train_confM_lasso, "heatmap")
+autoplot(test_confM_lasso, "heatmap")
+
+#End of Lasso Mod
+
+
+# LOGISTIC MODEL
+
+library('yardstick')
+
 set.seed(1818)
 
-Airlines_logit <- glm(satisfaction ~ Seat.comfort + Gate.location + Ease.of.Online.booking + Leg.room.service + Cleanliness + Departure.Delay.in.Minutes 
-+ Class + Inflight.wifi.service + Inflight.entertainment + On.board.service + Age,
+logit_mod1 <- glm(satisfaction ~ Seat.comfort + Gate.location + Ease.of.Online.booking + Leg.room.service + Cleanliness + Departure.Delay.in.Minutes 
+                                  + Class + Inflight.wifi.service + Inflight.entertainment + On.board.service + Age,
                   family = binomial,
                   data = Airline_train)
-summary(Airlines_logit)
-```
-```
 
-# Results_train and results_test
-```{r}
-library('yardstick')
-results_train <- data.frame(
+summary(logit_mod1)
 
+
+preds_train_logit <- predict(logit_mod1, 
+                             newdata=Airline_train,
+                             type = "response")
+
+preds_test_logit <- predict(logit_mod1, 
+                            newdata = Airline_test,
+                            type = "response")
+
+results_train_logit <- data.frame(
   `truth` = Airline_train%>% 
-
-     filter(!is.na(satisfaction),
-            !is.na(Seat.comfort),
-            !is.na(Gate.location), 
-            !is.na(Ease.of.Online.booking),
-            !is.na(Leg.room.service),
-            !is.na(Cleanliness),
-            !is.na(Departure.Delay.in.Minutes),
-            !is.na(Class),
-            !is.na(Inflight.wifi.service),
-            !is.na(Inflight.entertainment),
-            !is.na(On.board.service),
-            !is.na(Age)) %>% 
-
+       filter(!is.na(satisfaction),
+              !is.na(Seat.comfort),
+              !is.na(Gate.location), 
+              !is.na(Ease.of.Online.booking),
+              !is.na(Leg.room.service),
+              !is.na(Cleanliness),
+              !is.na(Departure.Delay.in.Minutes),
+              !is.na(Class),
+              !is.na(Inflight.wifi.service),
+              !is.na(Inflight.entertainment),
+              !is.na(On.board.service),
+              !is.na(Age)) %>% 
     select(satisfaction) %>%
-
     mutate(satisfaction = as.numeric(satisfaction)),
-
-   `Class1` =  preds_train,
-
-  `type` = rep("train",length(preds_train))
+   `Class1` =  preds_train_logit,
+    `type` = rep("train",length(preds_train_logit))
   ) %>% rename('truth' = 1)
-results_test <- data.frame(
 
-  `truth` = Airline_test   %>% 
-
-     filter(!is.na(satisfaction),
-            !is.na(Seat.comfort),
-            !is.na(Gate.location), 
-            !is.na(Ease.of.Online.booking),
-            !is.na(Leg.room.service),
-            !is.na(Cleanliness),
-            !is.na(Departure.Delay.in.Minutes),
-            !is.na(Class),
-            !is.na(Inflight.wifi.service),
-            !is.na(Inflight.entertainment),
-            !is.na(On.board.service),
-            !is.na(Age)) %>% 
-
+results_test_logit <- data.frame(
+  `truth` = Airline_test %>% 
+       filter(!is.na(satisfaction),
+              !is.na(Seat.comfort),
+              !is.na(Gate.location), 
+              !is.na(Ease.of.Online.booking),
+              !is.na(Leg.room.service),
+              !is.na(Cleanliness),
+              !is.na(Departure.Delay.in.Minutes),
+              !is.na(Class),
+              !is.na(Inflight.wifi.service),
+              !is.na(Inflight.entertainment),
+              !is.na(On.board.service),
+              !is.na(Age)) %>% 
     select(satisfaction) %>% 
-
     mutate(satisfaction = as.numeric(satisfaction)),
-
-   `Class1` =  preds_test,
-
-  `type` = rep("test",length(preds_test))
- 
+   `Class1` =  preds_test_logit,
+   `type` = rep("test",length(preds_test_logit))
   )  %>% rename('truth' = 1)
 
-head(results_train)
-head(results_test)
-```
+head(results_train_logit)
+head(results_test_logit)
 
-# Produce two ROC plots
-```{r}
+
 library('ggplot2')
 library('plotROC')
-train_ROC <- ggplot(results_train, 
+
+train_ROC_logit <- ggplot(results_train_logit, 
             aes(m = Class1, d = truth)) + 
-  geom_roc(labelsize = 3.5, 
+  geom_roc(labelsize = 2, 
            cutoffs.at = 
              c(0.99,0.9,0.7,0.5,0.3,0.1,0)) +
-  theme_minimal(base_size = 16) + ggtitle("Train ROC Plot")
-test_ROC <- ggplot(results_test, 
+  theme_minimal(base_size = 16) + ggtitle("Train Logit ROC Plot")
+
+test_ROC_logit <- ggplot(results_test_logit, 
             aes(m = Class1, d = truth)) + 
-  geom_roc(labelsize = 3.5, 
+  geom_roc(labelsize = 2, 
            cutoffs.at = 
              c(0.99,0.9,0.7,0.5,0.3,0.1,0)) +
-  theme_minimal(base_size = 16)+ ggtitle("Test ROC Plot")
+  theme_minimal(base_size = 16)+ ggtitle("Test Logit ROC Plot")
 
-print(train_ROC)
-print(test_ROC)
-```
-# Calculate the AUC for the ROC curve in the testing and trainig sets
-```{r}
-calc_auc(train_ROC)
-calc_auc(test_ROC)
-```
+print(train_ROC_logit)
+print(test_ROC_logit)
 
-#Prediction for train and test
-```{r}
-preds_train_logit <- predict(Airlines_logit, type = "response")
+calc_auc(train_ROC_logit)
+calc_auc(test_ROC_logit)
 
-preds_test_logit <- predict(Airlines_logit, type= "response",newdata= Airline_test)
-head(preds_test_logit)
-```
+results_train_logit <- data.frame(
+predicted = as.factor((ifelse(preds_train_logit > 0.5, 1, 0))), 
+actual = as.numeric(Airline_train$satisfaction),
+type = rep("train", length(preds_train_logit))
+) %>% 
+  rename(`predicted` = 1, `actual` = 2, `type` = 3) %>% 
+   mutate(actual = as.factor(ifelse(actual == 2, "1", "0")))
 
-```{r}
-results_train_logit <- data.frame(`truth` = Airline_train$satisfaction,
-                                  `class1` =preds_train_logit,
-                                  `Class2` = 1 - preds_train_logit,
-                                  `type` = rep("train", length(preds_train_logit)),
-                                  `predicted` = as.factor(ifelse(preds_train_logit > 0.5,1,0))) %>% mutate(truth = as.factor(ifelse(truth == "satisfied", "1", "0")))
 
-results_test_logit <- data.frame (
-  `truth` = Airline_test$satisfaction,
-  `class1` = preds_test_logit,
-  `Class2` = 1 - preds_test_logit,
-  `type` = rep("test", length(preds_test_logit)),
-  `predicted` = as.factor(ifelse(preds_test_logit > 0.5, 1, 0))) %>% mutate(truth = as.factor(ifelse(truth == "satisfied", "1", "0")))
-```
+results_test_logit <- data.frame ( 
+predicted = as.factor((ifelse(preds_test_logit > 0.5, 1, 0))), 
+actual = as.numeric(Airline_test$satisfaction),
+type = rep("test", length(preds_test_logit))
+) %>% 
+  rename(`predicted` = 1, `actual` = 2, `type` = 3) %>% 
+  mutate(actual = as.factor(ifelse(actual == 2, "1", "0")))
 
-# Confusion Matrix
-```{r}
+options(scipen = 9)
+exp(logit_mod1$coefficients)
+
 train_conf_logit <- conf_mat(results_train_logit,
-                             truth = truth,
+                             truth = actual,
                              estimate = predicted)
 
 test_conf_logit <- conf_mat(results_test_logit,
-                            truth = truth,
+                            truth = actual,
                             estimate = predicted)
-
 print(train_conf_logit)
 print(test_conf_logit)
+
 autoplot(train_conf_logit, "heatmap")
 autoplot(test_conf_logit, "heatmap")
-```
+
 # End of Logistic Model
 
-```{r}
-results_train2 <- data.frame( `truth` = as.factor(train_complete_cases$satisfaction),
-                            `Class1` =  preds_train, 
-                            `Class2` = 1 - preds_train,  
-                            `predicted` = as.factor(ifelse(preds_train > 0.1,1,0)))
-results_test2 <- data.frame( `truth` = as.factor(test_complete_cases$satisfaction),
-                            `Class1` =  preds_test, 
-                            `Class2` = 1 - preds_test,  
-                            `predicted` = as.factor(ifelse(preds_test > 0.1,1,0)))
+#RANDOM FOREST MODEL
 
-head(results_train2)
-head(results_test2)
-```
+library('randomForest')
 
-```{r}
-cm_train <- conf_mat(results_train2, 
-               truth = truth,
-               estimate = predicted)
-cm_test <- conf_mat(results_test2, 
-               truth = truth,
-               estimate = predicted)
-print(cm_train)
-print(cm_test)
-```
-# create a results train and test
-results_train <- data.frame(
-  predicted = preds_train,
-  actual = Airline_train %>% 
-    filter(complete.cases(Seat.comfort,Gate.location, Ease.of.Online.booking, Leg.room.service, Cleanliness, Departure.Delay.in.Minutes, Class, Inflight.wifi.service, Inflight.entertainment, On.board.service, Age)) %>% 
-    select(satisfaction),
-  type = rep("train", length(preds_train))
-) %>% 
-  rename(`predicted` = 1, `actual` = 2, `type` = 3) %>% mutate(predicted = as.factor(ifelse(predicted == 1, "1", "0")))%>% mutate(actual = as.factor(ifelse(actual == 2, "1", "0")))
+rf_mod1 <- randomForest(satisfaction ~ Gate.location + Ease.of.Online.booking + Leg.room.service                          + Cleanliness + Departure.Delay.in.Minutes + Arrival.Delay.in.Minutes +                            Class + Inflight.wifi.service + Inflight.entertainment +                                         On.board.service + Age, 
+                       data = Airline_train,
+                       type = classification,
+                       mtry = sqrt(ncol(Airline_train)),
+                       na.action = na.roughfix,
+                       ntree = 400, 
+                       importance = TRUE)
 
-head(preds_test)
-str(predicted)
+plot(rf_mod1) # we can see that it flatttens out around 100
+print(rf_mod1)
+varImpPlot(rf_mod1, type = 1)
+importance(rf_mod1)
 
-results_test <- data.frame(
-  predicted = preds_test,
-  actual = Airline_test %>% 
-    filter(complete.cases(Seat.comfort,Gate.location, Ease.of.Online.booking, Leg.room.service, Cleanliness, Departure.Delay.in.Minutes, Class, Inflight.wifi.service, Inflight.entertainment, On.board.service, Age)) %>% 
-    select(satisfaction),
-  type = rep("test", length(preds_test))
-) %>% 
-  rename(`predicted` = 1, `actual` = 2, `type` = 3) %>% mutate(actual = as.factor(ifelse(actual == 2, "1", "0")))
+rf_mods <- list()
+oob_err <- NULL
+test_err <- NULL
+for(mtry in 1:9){
+  rf_fit <- randomForest(satisfaction ~ Gate.location + Ease.of.Online.booking + Leg.room.service                          + Cleanliness + Departure.Delay.in.Minutes + Arrival.Delay.in.Minutes +                            Class + Inflight.wifi.service + Inflight.entertainment +                                         On.board.service + Age, 
+                         data = Airlines_clean,
+                         mtry = mtry,
+                         na.action = na.roughfix,
+                         ntree = 600)
+  oob_err[mtry] <- rf_fit$err.rate[600]
+  
+  cat(mtry," ")
+}
+
+results_DF <- data.frame(mtry = 1:9, oob_err)
+ggplot(results_DF, aes(x = mtry, y = oob_err)) + geom_point() + theme_minimal()
+  #mtry should be 2
+
+# making adjustments to our code with the new mtry and number of trees
+
+rf_mod2 <- randomForest(satisfaction ~ Gate.location + Ease.of.Online.booking + Leg.room.service + 
+                                        Cleanliness + Departure.Delay.in.Minutes + Arrival.Delay.in.Minutes +
+                                        Class + Inflight.wifi.service + Inflight.entertainment + On.board.service + Age, 
+                       data = Airline_train,
+                       type = classification,
+                       mtry = 2,
+                       na.action = na.roughfix,
+                       ntree = 100, 
+                       importance = TRUE)
+
+plot(rf_mod2)
+print(rf_mod2)
+
+#we can see that our error has decreased and we have improved our model. 
+
+
+varImpPlot(rf_mod2, type = 1)
+importance(rf_mod2)
